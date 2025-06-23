@@ -1,0 +1,69 @@
+warning: field `config` is never read
+  --> src/main.rs:35:5
+   |
+33 | struct AppState {
+   |        -------- field in this struct
+34 |     signaler: Arc<Signaler>,
+35 |     config: Config,
+   |     ^^^^^^
+   |
+   = note: `AppState` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `credential` and `expires_at` are never read
+  --> src/modules/signaling.rs:80:9
+   |
+79 | pub struct ExpiredCredential {
+   |            ----------------- fields in this struct
+80 |     pub credential: TurnCredentials,
+   |         ^^^^^^^^^^
+81 |     pub expires_at: chrono::DateTime<Utc>,
+   |         ^^^^^^^^^^
+   |
+   = note: `ExpiredCredential` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `validate_turn_credentials` is never used
+   --> src/modules/signaling.rs:130:12
+    |
+90  | impl Signaler {
+    | ------------- method in this implementation
+...
+130 |     pub fn validate_turn_credentials(&self, username: &str) -> Option<String> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `close` is never used
+  --> src/modules/turn_server.rs:58:18
+   |
+15 | impl TurnServer {
+   | --------------- method in this implementation
+...
+58 |     pub async fn close(&mut self) -> Result<()> {
+   |                  ^^^^^
+
+warning: fields `signaler` and `config` are never read
+  --> src/modules/turn_server.rs:69:5
+   |
+67 | struct SimpleTurnRelay {
+   |        --------------- fields in this struct
+68 |     socket: Arc<UdpSocket>,
+69 |     signaler: Arc<crate::modules::signaling::Signaler>,
+   |     ^^^^^^^^
+70 |     config: crate::modules::config::TurnConfig,
+   |     ^^^^^^
+
+warning: fields `client_addr` and `username` are never read
+  --> src/modules/turn_server.rs:76:5
+   |
+75 | struct TurnAllocation {
+   |        -------------- fields in this struct
+76 |     client_addr: SocketAddr,
+   |     ^^^^^^^^^^^
+77 |     relay_addr: SocketAddr,
+78 |     username: String,
+   |     ^^^^^^^^
+   |
+   = note: `TurnAllocation` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: `flutter-webrtc-server-rust` (bin "flutter-webrtc-server-rust") generated 6 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running `target/debug/flutter-webrtc-server-rust`
