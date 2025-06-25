@@ -151,6 +151,7 @@ impl Signaler {
     }
 
     pub async fn handle_websocket(&self, socket: WebSocket) {
+        info!("Starting WebSocket handler for new connection");
         let (mut sender, mut receiver) = socket.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<Method>();
         
@@ -179,27 +180,42 @@ impl Signaler {
         while let Some(msg) = receiver.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
+                    debug!("Received WebSocket text message: {}", text);
                     if let Err(e) = self.handle_message(text, &tx, &peer_id_clone).await {
                         error!("Error handling message: {}", e);
                     }
                 }
-                Ok(Message::Close(_)) => {
-                    info!("WebSocket connection closed");
+                Ok(Message::Close(close_frame)) => {
+                    info!("WebSocket connection closed gracefully: {:?}", close_frame);
                     break;
+                }
+                Ok(Message::Ping(data)) => {
+                    debug!("Received WebSocket ping, sending pong");
+                    if let Err(e) = sender.send(Message::Pong(data)).await {
+                        error!("Failed to send pong: {}", e);
+                        break;
+                    }
+                }
+                Ok(Message::Pong(_)) => {
+                    debug!("Received WebSocket pong");
                 }
                 Err(e) => {
                     error!("WebSocket error: {}", e);
                     break;
                 }
-                _ => {}
+                _ => {
+                    debug!("Received other WebSocket message type");
+                }
             }
         }
 
         // Cleanup on disconnect
         if let Some(id) = peer_id.lock().await.as_ref() {
-            info!("Removing peer: {}", id);
+            info!("WebSocket disconnected, removing peer: {}", id);
             peers_clone.remove(id);
             self.notify_peers_update();
+        } else {
+            info!("WebSocket disconnected before peer registration");
         }
 
         send_task.abort();
@@ -217,7 +233,8 @@ impl Signaler {
 
         match message {
             Method::New(peer_info) => {
-                info!("New peer: {} ({})", peer_info.name, peer_info.id);
+                info!("Registering new peer: {} (ID: {}, User-Agent: {})", 
+                      peer_info.name, peer_info.id, peer_info.user_agent);
                 
                 let peer = Peer {
                     info: peer_info.clone(),
@@ -225,12 +242,23 @@ impl Signaler {
                 };
                 
                 self.peers.insert(peer_info.id.clone(), peer);
-                *peer_id.lock().await = Some(peer_info.id);
+                *peer_id.lock().await = Some(peer_info.id.clone());
                 
+                info!("Peer {} successfully registered, notifying all peers", peer_info.id);
                 self.notify_peers_update();
             }
             Method::Offer(ref data) | Method::Answer(ref data) | Method::Candidate(ref data) => {
                 if let Ok(negotiation) = serde_json::from_value::<Negotiation>(data.clone()) {
+                    let msg_type = match &message {
+                        Method::Offer(_) => "offer",
+                        Method::Answer(_) => "answer",
+                        Method::Candidate(_) => "candidate",
+                        _ => "unknown",
+                    };
+                    
+                    info!("Relaying {} from {} to {} (session: {})", 
+                          msg_type, negotiation.from, negotiation.to, negotiation.session_id);
+                    
                     if let Some(target_peer) = self.peers.get(&negotiation.to) {
                         let relay_message = match &message {
                             Method::Offer(_) => Method::Offer(serde_json::to_value(&negotiation)?),
@@ -239,41 +267,58 @@ impl Signaler {
                             _ => unreachable!(),
                         };
                         
-                        if let Err(_) = target_peer.sender.send(relay_message) {
+                        if let Err(e) = target_peer.sender.send(relay_message) {
+                            error!("Failed to relay {} to peer {}: {}", msg_type, negotiation.to, e);
                             let error_msg = Method::Error(SignalingError {
                                 request: format!("{:?}", message),
                                 reason: format!("Peer [{}] not reachable", negotiation.to),
                             });
                             let _ = sender.send(error_msg);
+                        } else {
+                            debug!("{} successfully relayed to peer {}", msg_type, negotiation.to);
                         }
                     } else {
+                        warn!("Attempted to relay {} to unknown peer: {}", msg_type, negotiation.to);
                         let error_msg = Method::Error(SignalingError {
                             request: format!("{:?}", message),
                             reason: format!("Peer [{}] not found", negotiation.to),
                         });
                         let _ = sender.send(error_msg);
                     }
+                } else {
+                    error!("Failed to parse negotiation data for message: {:?}", message);
                 }
             }
             Method::Bye(bye) => {
+                info!("Handling bye message from {} for session {}", bye.from, bye.session_id);
                 let session_parts: Vec<&str> = bye.session_id.split('-').collect();
                 if session_parts.len() == 2 {
                     for &peer_id in &session_parts {
                         if let Some(peer) = self.peers.get(peer_id) {
+                            info!("Sending bye notification to peer: {}", peer_id);
                             let bye_message = Method::Bye(Byebye {
                                 session_id: bye.session_id.clone(),
                                 from: bye.from.clone(),
                             });
-                            let _ = peer.sender.send(bye_message);
+                            if let Err(e) = peer.sender.send(bye_message) {
+                                error!("Failed to send bye message to peer {}: {}", peer_id, e);
+                            }
+                        } else {
+                            warn!("Peer {} not found for bye notification", peer_id);
                         }
                     }
+                } else {
+                    warn!("Invalid session ID format for bye message: {}", bye.session_id);
                 }
             }
             Method::Keepalive => {
-                let _ = sender.send(Method::Keepalive);
+                debug!("Received keepalive, responding with keepalive");
+                if let Err(e) = sender.send(Method::Keepalive) {
+                    error!("Failed to send keepalive response: {}", e);
+                }
             }
             _ => {
-                warn!("Unknown message type: {:?}", message);
+                warn!("Received unknown/unhandled message type: {:?}", message);
             }
         }
 

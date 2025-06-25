@@ -100,15 +100,19 @@ impl SimpleTurnRelay {
                 Ok((len, addr)) => {
                     let data = &buffer[..len];
                     
+                    info!("Received {} bytes from {}", len, addr);
+                    
                     // Check if this is a STUN/TURN message
                     if len >= 20 && self.is_stun_message(data) {
+                        info!("Processing STUN/TURN message from {}", addr);
                         if let Err(e) = self.handle_stun_message(data, addr).await {
-                            warn!("Error handling STUN message from {}: {}", addr, e);
+                            error!("Error handling STUN message from {}: {}", addr, e);
                         }
                     } else {
+                        info!("Processing data relay from {}", addr);
                         // Handle data relay
                         if let Err(e) = self.handle_data_relay(data, addr).await {
-                            warn!("Error handling data relay from {}: {}", addr, e);
+                            error!("Error handling data relay from {}: {}", addr, e);
                         }
                     }
                 }
@@ -136,7 +140,14 @@ impl SimpleTurnRelay {
     }
 
     async fn handle_stun_message(&self, data: &[u8], addr: SocketAddr) -> Result<()> {
-        info!("Received STUN/TURN message from {} ({} bytes)", addr, data.len());
+        let msg_type = if data.len() >= 2 {
+            u16::from_be_bytes([data[0], data[1]])
+        } else {
+            0
+        };
+        
+        info!("Processing STUN/TURN message from {} ({} bytes, type: 0x{:04x})", 
+              addr, data.len(), msg_type);
         
         // For now, we'll implement basic STUN binding response
         // This is a simplified implementation - a full TURN server would need
@@ -144,10 +155,14 @@ impl SimpleTurnRelay {
         
         let response = self.create_binding_response(addr)?;
         
-        if let Err(e) = self.socket.send_to(&response, addr).await {
-            warn!("Failed to send STUN response to {}: {}", addr, e);
-        } else {
-            info!("Sent STUN binding response to {}", addr);
+        match self.socket.send_to(&response, addr).await {
+            Ok(bytes_sent) => {
+                info!("Successfully sent STUN binding response to {} ({} bytes)", addr, bytes_sent);
+            },
+            Err(e) => {
+                error!("Failed to send STUN response to {}: {}", addr, e);
+                return Err(e.into());
+            }
         }
         
         Ok(())
@@ -158,8 +173,11 @@ impl SimpleTurnRelay {
         let allocations = self.allocations.lock().await;
         
         if let Some(allocation) = allocations.get(&addr) {
-            info!("Relaying {} bytes from {} to {}", data.len(), addr, allocation.relay_addr);
+            info!("Relaying {} bytes from {} to {} (user: {})", 
+                  data.len(), addr, allocation.relay_addr, allocation.username);
             // In a real implementation, we would relay to the target
+        } else {
+            warn!("No allocation found for data relay from {}, {} bytes dropped", addr, data.len());
         }
         
         Ok(())

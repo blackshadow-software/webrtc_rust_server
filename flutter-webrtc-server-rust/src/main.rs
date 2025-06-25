@@ -86,7 +86,9 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    info!("New WebSocket connection attempt");
     ws.on_upgrade(move |socket| async move {
+        info!("WebSocket connection established, starting signaling handler");
         state.signaler.handle_websocket(socket).await;
     })
 }
@@ -95,14 +97,20 @@ async fn turn_credentials_handler(
     Query(params): Query<TurnQuery>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    info!("TURN credentials request for user: {}, service: {}", params.username, params.service);
+    
     if params.service != "turn" {
+        warn!("Invalid service requested: {}", params.service);
         return (StatusCode::BAD_REQUEST, Json("Invalid service")).into_response();
     }
 
     match state.signaler.generate_turn_credentials(&params.username) {
-        Ok(credentials) => Json(credentials).into_response(),
+        Ok(credentials) => {
+            info!("Successfully generated TURN credentials for user: {}", params.username);
+            Json(credentials).into_response()
+        },
         Err(e) => {
-            error!("Failed to generate TURN credentials: {}", e);
+            error!("Failed to generate TURN credentials for user {}: {}", params.username, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json("Failed to generate credentials")).into_response()
         }
     }
