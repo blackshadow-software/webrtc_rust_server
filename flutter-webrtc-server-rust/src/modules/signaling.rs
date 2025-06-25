@@ -81,8 +81,25 @@ pub struct ExpiredCredential {
     pub expires_at: chrono::DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CallSession {
+    pub session_id: String,
+    pub caller_id: String,
+    pub callee_id: String,
+    pub started_at: chrono::DateTime<Utc>,
+    pub status: CallStatus,
+}
+
+#[derive(Debug, Clone)]
+pub enum CallStatus {
+    Calling,    // Offer sent, waiting for answer
+    Connected,  // Answer received, call in progress
+    Ended,      // Call terminated
+}
+
 pub struct Signaler {
     pub peers: Arc<DashMap<String, Peer>>,
+    pub sessions: Arc<DashMap<String, CallSession>>,
     pub turn_credentials: Arc<DashMap<String, ExpiredCredential>>,
     pub turn_config: crate::modules::config::TurnConfig,
 }
@@ -91,6 +108,7 @@ impl Signaler {
     pub fn new(turn_config: crate::modules::config::TurnConfig) -> Self {
         Self {
             peers: Arc::new(DashMap::new()),
+            sessions: Arc::new(DashMap::new()),
             turn_credentials: Arc::new(DashMap::new()),
             turn_config,
         }
@@ -248,68 +266,154 @@ impl Signaler {
                 info!("Peer {} successfully registered, notifying all peers", peer_info.id);
                 self.notify_peers_update();
             }
-            Method::Offer(ref data) | Method::Answer(ref data) | Method::Candidate(ref data) => {
+            Method::Offer(ref data) => {
                 if let Ok(negotiation) = serde_json::from_value::<Negotiation>(data.clone()) {
-                    let msg_type = match &message {
-                        Method::Offer(_) => "offer",
-                        Method::Answer(_) => "answer",
-                        Method::Candidate(_) => "candidate",
-                        _ => "unknown",
-                    };
+                    info!("📞 CALL INITIATED: {} calling {} (session: {})", 
+                          negotiation.from, negotiation.to, negotiation.session_id);
                     
-                    info!("Relaying {} from {} to {} (session: {})", 
-                          msg_type, negotiation.from, negotiation.to, negotiation.session_id);
+                    // Create call session
+                    let session = CallSession {
+                        session_id: negotiation.session_id.clone(),
+                        caller_id: negotiation.from.clone(),
+                        callee_id: negotiation.to.clone(),
+                        started_at: Utc::now(),
+                        status: CallStatus::Calling,
+                    };
+                    self.sessions.insert(negotiation.session_id.clone(), session);
+                    info!("📝 Call session created: {}", negotiation.session_id);
                     
                     if let Some(target_peer) = self.peers.get(&negotiation.to) {
-                        let relay_message = match &message {
-                            Method::Offer(_) => Method::Offer(serde_json::to_value(&negotiation)?),
-                            Method::Answer(_) => Method::Answer(serde_json::to_value(&negotiation)?),
-                            Method::Candidate(_) => Method::Candidate(serde_json::to_value(&negotiation)?),
-                            _ => unreachable!(),
-                        };
+                        info!("📤 Forwarding offer to recipient: {}", negotiation.to);
+                        let relay_message = Method::Offer(data.clone());
                         
                         if let Err(e) = target_peer.sender.send(relay_message) {
-                            error!("Failed to relay {} to peer {}: {}", msg_type, negotiation.to, e);
+                            error!("❌ Failed to deliver offer to {}: {}", negotiation.to, e);
+                            // Update session status to ended
+                            if let Some(mut session) = self.sessions.get_mut(&negotiation.session_id) {
+                                session.status = CallStatus::Ended;
+                            }
                             let error_msg = Method::Error(SignalingError {
-                                request: format!("{:?}", message),
-                                reason: format!("Peer [{}] not reachable", negotiation.to),
+                                request: "offer".to_string(),
+                                reason: format!("Recipient [{}] unreachable", negotiation.to),
                             });
                             let _ = sender.send(error_msg);
                         } else {
-                            debug!("{} successfully relayed to peer {}", msg_type, negotiation.to);
+                            info!("✅ Offer successfully delivered to {}", negotiation.to);
                         }
                     } else {
-                        warn!("Attempted to relay {} to unknown peer: {}", msg_type, negotiation.to);
+                        error!("❌ CALL FAILED: Recipient {} not found", negotiation.to);
+                        // Update session status to ended
+                        if let Some(mut session) = self.sessions.get_mut(&negotiation.session_id) {
+                            session.status = CallStatus::Ended;
+                        }
                         let error_msg = Method::Error(SignalingError {
-                            request: format!("{:?}", message),
-                            reason: format!("Peer [{}] not found", negotiation.to),
+                            request: "offer".to_string(),
+                            reason: format!("Recipient [{}] not available", negotiation.to),
                         });
                         let _ = sender.send(error_msg);
                     }
                 } else {
-                    error!("Failed to parse negotiation data for message: {:?}", message);
+                    error!("❌ Invalid offer format: {:?}", data);
+                }
+            }
+            Method::Answer(ref data) => {
+                if let Ok(negotiation) = serde_json::from_value::<Negotiation>(data.clone()) {
+                    info!("📞 CALL ANSWERED: {} answered call from {} (session: {})", 
+                          negotiation.from, negotiation.to, negotiation.session_id);
+                    
+                    // Update session status to connected
+                    if let Some(mut session) = self.sessions.get_mut(&negotiation.session_id) {
+                        session.status = CallStatus::Connected;
+                        info!("🔗 Call session connected: {}", negotiation.session_id);
+                    } else {
+                        warn!("⚠️ No session found for answer: {}", negotiation.session_id);
+                    }
+                    
+                    if let Some(target_peer) = self.peers.get(&negotiation.to) {
+                        info!("📤 Forwarding answer to caller: {}", negotiation.to);
+                        let relay_message = Method::Answer(data.clone());
+                        
+                        if let Err(e) = target_peer.sender.send(relay_message) {
+                            error!("❌ Failed to deliver answer to {}: {}", negotiation.to, e);
+                            // Update session status to ended
+                            if let Some(mut session) = self.sessions.get_mut(&negotiation.session_id) {
+                                session.status = CallStatus::Ended;
+                            }
+                            let error_msg = Method::Error(SignalingError {
+                                request: "answer".to_string(),
+                                reason: format!("Caller [{}] unreachable", negotiation.to),
+                            });
+                            let _ = sender.send(error_msg);
+                        } else {
+                            info!("✅ Answer successfully delivered to {}", negotiation.to);
+                        }
+                    } else {
+                        error!("❌ ANSWER FAILED: Caller {} not found", negotiation.to);
+                        // Update session status to ended
+                        if let Some(mut session) = self.sessions.get_mut(&negotiation.session_id) {
+                            session.status = CallStatus::Ended;
+                        }
+                        let error_msg = Method::Error(SignalingError {
+                            request: "answer".to_string(),
+                            reason: format!("Caller [{}] no longer available", negotiation.to),
+                        });
+                        let _ = sender.send(error_msg);
+                    }
+                } else {
+                    error!("❌ Invalid answer format: {:?}", data);
+                }
+            }
+            Method::Candidate(ref data) => {
+                if let Ok(negotiation) = serde_json::from_value::<Negotiation>(data.clone()) {
+                    debug!("🔗 ICE candidate from {} to {} (session: {})", 
+                          negotiation.from, negotiation.to, negotiation.session_id);
+                    
+                    if let Some(target_peer) = self.peers.get(&negotiation.to) {
+                        let relay_message = Method::Candidate(data.clone());
+                        
+                        if let Err(e) = target_peer.sender.send(relay_message) {
+                            warn!("⚠️ Failed to relay ICE candidate to {}: {}", negotiation.to, e);
+                        } else {
+                            debug!("✅ ICE candidate relayed to {}", negotiation.to);
+                        }
+                    } else {
+                        warn!("⚠️ ICE candidate target peer {} not found", negotiation.to);
+                    }
+                } else {
+                    error!("❌ Invalid ICE candidate format: {:?}", data);
                 }
             }
             Method::Bye(bye) => {
-                info!("Handling bye message from {} for session {}", bye.from, bye.session_id);
+                info!("📞 CALL ENDED: {} ended call for session {}", bye.from, bye.session_id);
+                
+                // Update session status to ended
+                if let Some(mut session) = self.sessions.get_mut(&bye.session_id) {
+                    session.status = CallStatus::Ended;
+                    info!("📝 Call session ended: {}", bye.session_id);
+                }
+                
                 let session_parts: Vec<&str> = bye.session_id.split('-').collect();
                 if session_parts.len() == 2 {
                     for &peer_id in &session_parts {
-                        if let Some(peer) = self.peers.get(peer_id) {
-                            info!("Sending bye notification to peer: {}", peer_id);
-                            let bye_message = Method::Bye(Byebye {
-                                session_id: bye.session_id.clone(),
-                                from: bye.from.clone(),
-                            });
-                            if let Err(e) = peer.sender.send(bye_message) {
-                                error!("Failed to send bye message to peer {}: {}", peer_id, e);
+                        if peer_id != bye.from { // Don't send bye back to sender
+                            if let Some(peer) = self.peers.get(peer_id) {
+                                info!("📤 Notifying {} that call ended", peer_id);
+                                let bye_message = Method::Bye(Byebye {
+                                    session_id: bye.session_id.clone(),
+                                    from: bye.from.clone(),
+                                });
+                                if let Err(e) = peer.sender.send(bye_message) {
+                                    error!("❌ Failed to notify {} of call end: {}", peer_id, e);
+                                } else {
+                                    info!("✅ Call end notification sent to {}", peer_id);
+                                }
+                            } else {
+                                warn!("⚠️ Peer {} not found for call end notification", peer_id);
                             }
-                        } else {
-                            warn!("Peer {} not found for bye notification", peer_id);
                         }
                     }
                 } else {
-                    warn!("Invalid session ID format for bye message: {}", bye.session_id);
+                    warn!("⚠️ Invalid session ID format for bye message: {}", bye.session_id);
                 }
             }
             Method::Keepalive => {
