@@ -37,7 +37,9 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .init();
 
     let config = Config::load_from_file("configs/config.ini")?;
     info!("Loaded configuration: {:?}", config);
