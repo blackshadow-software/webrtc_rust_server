@@ -6,7 +6,7 @@ use axum::{
     routing::{get, get_service},
     Router,
 };
-use log::{error, info};
+use log::{error, info, warn};
 use serde::Deserialize;
 use std::{net::SocketAddr, sync::Arc};
 use tower::ServiceBuilder;

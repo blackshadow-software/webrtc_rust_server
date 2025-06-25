@@ -177,6 +177,7 @@ impl Signaler {
         });
 
         // Handle incoming messages
+        let ping_sender = tx.clone();
         while let Some(msg) = receiver.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
@@ -191,8 +192,8 @@ impl Signaler {
                 }
                 Ok(Message::Ping(data)) => {
                     debug!("Received WebSocket ping, sending pong");
-                    if let Err(e) = sender.send(Message::Pong(data)).await {
-                        error!("Failed to send pong: {}", e);
+                    if let Err(e) = ping_sender.send(Method::Keepalive) {
+                        error!("Failed to send pong response: {}", e);
                         break;
                     }
                 }
